@@ -1,16 +1,16 @@
 ################################################################################
 ###                           Table of contents
 ################################################################################
-# docker-compose.yml - Docker configuration for all services but FredBoat. For development
-# selfhosting.yml    - The same file but *including* FredBoat
+# docker-compose.yml - Docker configuration for all services
 # common.yml         - Contains essential configuration for FredBoat and Sentinel
 # fredboat.yml       - FredBoat config
 # lavalink.yml       - Lavalink config
 # quarterdeck.yml    - Quarterdeck config
-#
+
+# **If using Docker Swarm, it's better to use "configs" and "secrets" to store these files**
 
 ################################################################################
-###                  Selfhosting FredBoat with docker-compose
+###                  Selfhosting FredBoat with Docker Swarm
 ################################################################################
 ###
 ### Use a proper text editor like Sublime when editing this file
@@ -21,7 +21,7 @@
 ### on the FredBoat Hangout Discord server: https://discord.gg/cgPFW4q
 
 
-version: '3' # This is not the FredBoat version, do not touch this line.
+version: '3.7' # This is not the FredBoat version, do not touch this line.
 services:
 
   ################################################################################
@@ -29,20 +29,9 @@ services:
   ################################################################################
   db:
     image: fredboat/postgres:latest
-    #image: fredboat/postgres:arm64v8   #for (some) arm based machines
-    #build: ./FredBoat/docker/database/ #useful alternative for developers
     restart: always
-    labels:
-    - "com.centurylinklabs.watchtower.enable=true"
-
-    # WINDOWS ONLY: if you are running under windows you need to comment out the following two lines:
     volumes:
-    - ./postgres-data:/var/lib/postgresql/data
-
-    # WINDOWS ONLY: if you are running under windows and want to take manual backups of the database
-    # via a docker volume, uncomment the following two lines and read the snippet at the bottom of this file
-    #volumes:
-    #- postgres-data-volume:/var/lib/postgresql/data
+        - postgres-data-volume:/var/lib/postgresql/data
 
   ################################################################################
   ##                               RabbitMQ
@@ -51,10 +40,8 @@ services:
     image: rabbitmq:3-management
     restart: always
     ports:
-     - 127.0.0.1:5672:5672   # The broker
-     - 127.0.0.1:15672:15672 # Web UI
-    labels:
-     - "com.centurylinklabs.watchtower.enable=true"
+        - 5672:5672   # The broker
+        - 15672:15672 # Web UI
 
   ################################################################################
   ##                               Lavalink
@@ -62,14 +49,14 @@ services:
   lavalink:
     image: fredboat/lavalink:master
     restart: always
-    labels:
-    - "com.centurylinklabs.watchtower.enable=true"
     ports:
-    - 127.0.01:2333:2333
+        - 2333:2333
     volumes:
-    - ./lavalink.yml:/opt/Lavalink/application.yaml
-    - ./lavalink_logs:/opt/Lavalink/logs
-    # Need a bigger memory size or any other custom JVM args? Edit the line below accordingly
+        - lavalink_logs:/opt/Lavalink/logs
+    configs:
+        - source: lavalink_yml
+          target: /opt/Lavalink/application.yaml
+          mode: 0644
     entrypoint: java -Xmx128m -jar Lavalink.jar
 
   ################################################################################
@@ -79,76 +66,84 @@ services:
     image: fredboat/sentinel:dev
     restart: on-failure:3
     depends_on:
-    - rabbitmq
-    labels:
-    - "com.centurylinklabs.watchtower.enable=true"
+        - rabbitmq
+    secrets:
+        - source: fredboat_secret
+          target: /opt/sentinel/common.yml
+          mode: 0644
     volumes:
-    - ./sentinel_logs:/opt/sentinel/logs
-    - ./common.yml:/opt/sentinel/common.yml
+        - sentinel_logs:/opt/sentinel/logs
     environment:
-    - "SPRING_RABBITMQ_ADDRESSES=amqp://guest:guest@rabbitmq"
+        - "SPRING_RABBITMQ_ADDRESSES=amqp://guest:guest@rabbitmq"
     # Need a bigger memory size or any other custom JVM args? Uncomment and edit the line below accordingly
-    #entrypoint: java -Xmx512m -jar sentinel.jar
+    # entrypoint: java -Xmx512m -jar sentinel.jar
 
   ################################################################################
   ##                     Quarterdeck (Database Backend)
   ################################################################################
   quarterdeck:
-    # versions (example: v2) receive continous non-breaking (best effort) updates via watchtower. switching between versions
-    # (example: going from v2 to v3) usually requires manual migration. what exactly is needed is published on the
-    # FredBoat selfhosting website and/or the selfhosters channel (see top of this file for how to get to these places)
-    # Once you use the dev branch, you may not be able to go back to stable without deleting your database.
-    # To run on (some) arm based machines, prepend the tag with arm64v8-, for example: fredboat/quarterdeck:arm64v8-dev-v1
-    #image: fredboat/quarterdeck:stable-v1
-    image: fredboat/quarterdeck:dev-v1
+    image: fredboat/quarterdeck:stable-v1
     restart: always
-    labels:
-    - "com.centurylinklabs.watchtower.enable=true"
     depends_on:
-    - db
+        - db
     ports:
-    - 127.0.01:4269:4269
+        - 4269:4269
+    configs:
+        - source: quarterdeck_yml
+          target: /opt/Quarterdeck/quarterdeck.yaml
+          mode: 0644
     volumes:
-    - ./quarterdeck.yml:/opt/Quarterdeck/quarterdeck.yaml
-    - ./quarterdeck_logs:/opt/Quarterdeck/logs
+        - quarterdeck_logs:/opt/Quarterdeck/logs
 
     # Need a bigger memory size or any other custom JVM args? Edit the list below accordingly
     entrypoint:
-     - java
-     - -Xmx128m
-     - -jar
-     - Quarterdeck.jar
-     - >
-       --spring.application.json={"security": {"admins": [{"name": "docker", "pass": "docker"}]}}
+        - java
+        - -Xmx128m
+        - -jar
+        - Quarterdeck.jar
+        - >
+          --spring.application.json={"security": {"admins": [{"name": "docker", "pass": "docker"}]}}
 
   ################################################################################
-  ##                         Automatic updates
+  ##                               FredBoat
   ################################################################################
-  # if you want automatic updates, uncomment the watchtower lines below
-  # watchtower is not yet officially available for arm64v8. See https://github.com/v2tec/watchtower/pull/178 for progress
-  # but you can try using napstr/watchtower:arm64v8-latest
+  bot:
+    image: fredboat/fredboat:sentinel-v3
+    restart: on-failure:3
+    depends_on:
+        - quarterdeck
+        - sentinel
+        - lavalink
+    secrets:
+        - source: fredboat_secret
+          target: /opt/FredBoat/common.yml
+          mode: 0644
+        - source: fredboat_yml
+          target: /opt/FredBoat/fredboat.yml
+          mode: 0644
+    ports:
+        - 1356:1356
+    environment:
+        - "SPRING_RABBITMQ_ADDRESSES=amqp://guest:guest@rabbitmq"
+    volumes:
+        - fredboat_logs:/opt/FredBoat/logs
+      # - ./music_persistence:/opt/FredBoat/music_persistence   # Need a bigger memory size or any other custom JVM args? uncomment and edit the line below accordingly
+    #entrypoint: java -Xmx256m -jar FredBoat.jar
+volumes:
+    postgres-data-volume:
+    lavalink_logs:
+    sentinel_logs:
+    quarterdeck_logs:
+    fredboat_logs:
 
-  #watchtower:
-  #  image: v2tec/watchtower
-  #  restart: on-failure:3
-  #  labels:
-  #    - "com.centurylinklabs.watchtower.enable=true"
-  #  volumes:
-  #    - /var/run/docker.sock:/var/run/docker.sock
-  #  command: --cleanup --label-enable --interval 300 #seconds
+configs:
+    lavalink_yml:
+        external: true
+    quarterdeck_yml:
+        external: true
 
-
-  ################################################################################
-  ##                         Windows stuff
-  ################################################################################
-
-# WINDOWS ONLY: If you are running on Windows and want to be able to backup the postgres data volume, run
-#
-#   docker volume create --name postgres-data-volume -d local
-#
-# and uncomment the following lines:
-# See also the WINDOWS ONLY hints in the database section
-
-#volumes:
-#  postgres-data-volume:
-#    external: true
+secrets:
+    fredboat_secret:
+        external: true
+    fredboat_yml:
+        external: true
